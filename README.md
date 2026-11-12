@@ -16,6 +16,10 @@
 
 不挂补丁时，表现和官方 13.0.0 完全一样。
 
+官方 13.0.0 自带的语音模块也都保留，可以照常使用：语音识别（NobodyWhoSpeechToText）、语音合成（NobodyWhoTextToSpeech）、语音活动检测（NobodyWhoVoiceActivityDetection）。用法见 [官方文档](https://github.com/nobodywho-ooo/nobodywho/tree/main/docs/docs-godot)。
+
+适用平台：Windows x86_64，Vulkan 显卡加速。这是非官方修改版。
+
 > English summary at the bottom.
 
 ## 下载
@@ -50,9 +54,9 @@ var model = await NobodyWhoModel.create("res://models/your-model.gguf", {})
 var plain = await NobodyWhoChat.create(model, {"system_prompt": "..."})
 
 # 挂补丁：只对这个对话生效
-var girl = await NobodyWhoChat.create(model, {
+var npc_a = await NobodyWhoChat.create(model, {
     "system_prompt": "...",
-    "lora_path": "E:/path/to/girl_lora.gguf",  # LoRA 补丁文件（GGUF 格式）
+    "lora_path": "res://lora/npc_a.gguf",     # LoRA 补丁文件（GGUF 格式）
     "lora_scale": 1.0,                         # 补丁强度，可不写，默认 1.0
 })
 ```
@@ -165,6 +169,7 @@ var chat = await NobodyWhoChat.create(model, {"lora_path": "path/to/adapter.gguf
 
 - Several chats can share one `NobodyWhoModel`, each with its own adapter (or none).
 - Each adapter file is loaded once per model.
+- The voice modules of 13.0.0 (speech-to-text, text-to-speech, voice activity detection) are included unchanged.
 - Without `lora_path`, output is identical to the official 13.0.0 build (tested at temperature 0).
 - Download the DLL from **Releases** (SHA256 above) and replace `addons/nobodywho/libnobodywho-godot-x86_64-pc-windows-msvc-release.dll`.
 - Source changes are in `patches/`. Apply them to `nobodywho` at tag `nobodywho-godot-v13.0.0` and `llama-cpp-rs` at commit `22e5874`, cloned side by side, then build with Vulkan SDK 1.4.313.2.
