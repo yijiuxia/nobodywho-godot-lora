@@ -1,0 +1,227 @@
+From 48c5bf0addfc6d6dcc94a2fc4548a604893a3646 Mon Sep 17 00:00:00 2001
+From: yijiuxia <239743279+yijiuxia@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 10:30:22 -0500
+Subject: [PATCH] lora-per-chat: per-chat LoRA adapters for NobodyWhoChat
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nobodywho/Cargo.lock         |  2 --
+ nobodywho/core/Cargo.toml    |  7 ++++---
+ nobodywho/core/src/chat.rs   | 12 +++++++++++-
+ nobodywho/core/src/errors.rs |  6 ++++++
+ nobodywho/core/src/llm.rs    | 35 +++++++++++++++++++++++++++++++++++
+ nobodywho/godot/src/chat.rs  | 14 ++++++++++++++
+ 6 files changed, 70 insertions(+), 6 deletions(-)
+
+diff --git a/nobodywho/Cargo.lock b/nobodywho/Cargo.lock
+index f8722cc..7ec0128 100644
+--- a/nobodywho/Cargo.lock
++++ b/nobodywho/Cargo.lock
+@@ -2913,7 +2913,6 @@ dependencies = [
+ [[package]]
+ name = "llama-cpp-2"
+ version = "0.1.161"
+-source = "git+https://github.com/nobodywho-ooo/llama-cpp-rs.git?branch=lfm-support-hack#22e58741ca94a78abf43ffd1f74763b6945d312f"
+ dependencies = [
+  "enumflags2",
+  "llama-cpp-sys-2",
+@@ -2927,7 +2926,6 @@ dependencies = [
+ [[package]]
+ name = "llama-cpp-sys-2"
+ version = "0.1.161"
+-source = "git+https://github.com/nobodywho-ooo/llama-cpp-rs.git?branch=lfm-support-hack#22e58741ca94a78abf43ffd1f74763b6945d312f"
+ dependencies = [
+  "bindgen",
+  "cc",
+diff --git a/nobodywho/core/Cargo.toml b/nobodywho/core/Cargo.toml
+index 9b6b0ea..0f5b4a2 100644
+--- a/nobodywho/core/Cargo.toml
++++ b/nobodywho/core/Cargo.toml
+@@ -18,7 +18,8 @@ chrono = "0.4.39"
+ gbnf = { path = "../grammar/gbnf" }
+ llguidance = "1.7.5"
+ # Currently llama.cpp v0.8.0, update the docs too when updating this.
+-llama-cpp-2 = { git = "https://github.com/nobodywho-ooo/llama-cpp-rs.git", branch = "lfm-support-hack", default-features = false, features = [
++# lora-per-chat: llama-cpp-rs checked out next to this repo (commit 22e5874 + llama-cpp-rs-lora.patch).
++llama-cpp-2 = { path = "../../../llama-cpp-rs/llama-cpp-2", default-features = false, features = [
+     "openmp",
+     "mtmd",
+     "llguidance",
+@@ -94,7 +95,7 @@ libc = "0.2"
+ # search path, which then resolves `-lgomp` to the non-PIC `libgomp.a` and
+ # breaks linking the cdylib ("relocation R_X86_64_TPOFF32 against hidden symbol
+ # `gomp_tls_data`"). Desktop keeps the dynamic libstdc++ it has always used.
+-llama-cpp-2 = { git = "https://github.com/nobodywho-ooo/llama-cpp-rs.git", branch = "lfm-support-hack", default-features = false, features = [
++llama-cpp-2 = { path = "../../../llama-cpp-rs/llama-cpp-2", default-features = false, features = [
+     "android-static-stdcxx",
+     "vulkan",
+     "opencl",
+@@ -117,7 +118,7 @@ ort = { version = "=2.0.0-rc.15", default-features = false, features = [
+ # Apple platforms use Metal, which is auto-enabled by llama-cpp-rs for all Apple targets
+ # (except watchOS which has no Metal support — handled in llama-cpp-rs build.rs).
+ [target.'cfg(all(not(target_os = "macos"), not(target_os = "ios"), not(target_os = "visionos"), not(target_os = "watchos"), not(target_os = "android"), any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")))'.dependencies]
+-llama-cpp-2 = { git = "https://github.com/nobodywho-ooo/llama-cpp-rs.git", branch = "lfm-support-hack", default-features = false, features = [
++llama-cpp-2 = { path = "../../../llama-cpp-rs/llama-cpp-2", default-features = false, features = [
+     "openmp",
+     "vulkan",
+     "mtmd",
+diff --git a/nobodywho/core/src/chat.rs b/nobodywho/core/src/chat.rs
+index cb8ee7e..4d30f88 100644
+--- a/nobodywho/core/src/chat.rs
++++ b/nobodywho/core/src/chat.rs
+@@ -487,6 +487,9 @@ pub struct ChatConfig {
+     /// How old turns are forgotten when the context is full. `None` disables
+     /// shifting, so a full context is an error instead.
+     pub context_shift: Option<ContextShiftOptions>,
++    /// lora-per-chat: LoRA adapter for this chat only, as (file path, scale). `None` = base model.
++    /// Chats sharing one `Model` load each adapter file once; every chat applies its own.
++    pub lora: Option<(String, f32)>,
+ }
+ 
+ impl Default for ChatConfig {
+@@ -500,6 +503,7 @@ impl Default for ChatConfig {
+             mtp: None,
+             n_threads: None,
+             context_shift: Some(ContextShiftOptions::default()),
++            lora: None,
+         }
+     }
+ }
+@@ -2135,7 +2139,7 @@ impl Chat {
+                 model_output.resolved_format(),
+             )?;
+ 
+-            let engine = InferenceEngine::new_with_type(
++            let mut engine = InferenceEngine::new_with_type(
+                 model,
+                 config.n_ctx,
+                 false,
+@@ -2144,6 +2148,12 @@ impl Chat {
+                 LlamaPoolingType::None,
+             )?;
+ 
++            // lora-per-chat: attach this chat's LoRA adapter to its own context.
++            if let Some((path, scale)) = &config.lora {
++                let adapter = model.lora(path)?;
++                engine.ctx.lora_adapter_set_shared(&adapter, *scale)?;
++            }
++
+             Ok::<_, InitWorkerError>(ChatContext {
+                 engine,
+                 sampler: ChatSampler::new(base_sampler, tool_sampler),
+diff --git a/nobodywho/core/src/errors.rs b/nobodywho/core/src/errors.rs
+index 7d16848..611a34c 100644
+--- a/nobodywho/core/src/errors.rs
++++ b/nobodywho/core/src/errors.rs
+@@ -405,6 +405,12 @@ pub enum InitWorkerError {
+     #[error("MTP speculative decoding failed to initialize: {0}")]
+     MtpSpeculative(#[from] llama_cpp_2::speculative::MtpSpeculativeError),
+ 
++    #[error("Could not load LoRA adapter '{path}': {reason}")]
++    LoraLoad { path: String, reason: String },
++
++    #[error("Could not apply LoRA adapter: {0}")]
++    LoraApply(#[from] llama_cpp_2::LlamaLoraAdapterSetError),
++
+     #[error("MTP requested but no draft model was loaded")]
+     #[diagnostic(
+         code(nobodywho::mtp_draft_model_not_loaded),
+diff --git a/nobodywho/core/src/llm.rs b/nobodywho/core/src/llm.rs
+index c67d545..38c51a0 100644
+--- a/nobodywho/core/src/llm.rs
++++ b/nobodywho/core/src/llm.rs
+@@ -44,6 +44,9 @@ pub struct Model {
+     pub(crate) language_model: LlamaModel,
+     pub(crate) projection_model: Option<Mutex<ProjectionModel>>,
+     pub(crate) draft_model: Option<DraftModel>,
++    /// lora-per-chat: LoRA adapters loaded for this model, keyed by file path. Each file is
++    /// loaded once and shared by every chat that asks for it.
++    pub(crate) loras: Mutex<std::collections::HashMap<String, Arc<llama_cpp_2::model::LlamaLoraAdapter>>>,
+ }
+ 
+ #[derive(Debug)]
+@@ -77,6 +80,37 @@ impl Model {
+         self.language_model.n_ctx_train()
+     }
+ 
++    /// lora-per-chat: get (loading on first use) the LoRA adapter at `path`.
++    pub(crate) fn lora(
++        &self,
++        path: &str,
++    ) -> Result<Arc<llama_cpp_2::model::LlamaLoraAdapter>, InitWorkerError> {
++        let mut loras = self.loras.lock().map_err(|_| InitWorkerError::LoraLoad {
++            path: path.to_string(),
++            reason: "lora cache lock poisoned".into(),
++        })?;
++        if let Some(adapter) = loras.get(path) {
++            return Ok(adapter.clone());
++        }
++        if !std::path::Path::new(path).exists() {
++            return Err(InitWorkerError::LoraLoad {
++                path: path.to_string(),
++                reason: "file not found".into(),
++            });
++        }
++        let adapter = self
++            .language_model
++            .lora_adapter_init_shared(path)
++            .map_err(|e| InitWorkerError::LoraLoad {
++                path: path.to_string(),
++                reason: e.to_string(),
++            })?;
++        info!(path, "Loaded LoRA adapter");
++        let adapter = Arc::new(adapter);
++        loras.insert(path.to_string(), adapter.clone());
++        Ok(adapter)
++    }
++
+     pub fn is_generative_model(&self) -> bool {
+         let Ok(arch) = self.language_model.meta_val_str("general.architecture") else {
+             return true;
+@@ -284,6 +318,7 @@ pub fn get_model_cancellable(
+         language_model,
+         projection_model,
+         draft_model,
++        loras: Mutex::new(std::collections::HashMap::new()),
+     })
+ }
+ 
+diff --git a/nobodywho/godot/src/chat.rs b/nobodywho/godot/src/chat.rs
+index e6d9cec..0545bac 100644
+--- a/nobodywho/godot/src/chat.rs
++++ b/nobodywho/godot/src/chat.rs
+@@ -49,6 +49,9 @@ impl NobodyWhoChat {
+     /// `config` is a Dictionary with optional keys:
+     /// - `"system_prompt"` (String): the system prompt.
+     /// - `"n_ctx"` (int): context window size (default 4096).
++    /// - `"lora_path"` (String): lora-per-chat: LoRA adapter (GGUF) used by this chat only. Empty = none.
++    ///   Chats sharing one NobodyWhoModel load each adapter file once.
++    /// - `"lora_scale"` (float): lora-per-chat: strength of that adapter (default 1.0).
+     /// - `"n_threads"` (int): inference thread count (default: auto-detect).
+     /// - `"use_gpu"` (bool, default true): only used when `model` is a path;
+     ///   a NobodyWhoModel already carries its own GPU setting.
+@@ -574,6 +577,8 @@ impl NobodyWhoChat {
+                 "tools",
+                 "mtp",
+                 "context_shift",
++                "lora_path",
++                "lora_scale",
+             ],
+         )?;
+         let defaults = nobodywho::chat::ChatConfig::default();
+@@ -598,6 +603,15 @@ impl NobodyWhoChat {
+                 Some(value) => parse_context_shift(&value)?,
+                 None => defaults.context_shift,
+             },
++            // lora-per-chat: per-chat LoRA adapter
++            lora: dict_get::<GString>(config, "lora_path")?
++                .map(|p| p.to_string())
++                .filter(|p| !p.is_empty())
++                .map(|p| -> Result<(String, f32), String> {
++                    let scale = dict_get::<f64>(config, "lora_scale")?.unwrap_or(1.0) as f32;
++                    Ok((p, scale))
++                })
++                .transpose()?,
+             ..defaults
+         };
+         let use_gpu = dict_get::<bool>(config, "use_gpu")?.unwrap_or(true);

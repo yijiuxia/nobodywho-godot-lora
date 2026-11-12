@@ -1,0 +1,89 @@
+From 4da4ff2010042982d4c67f372ab829f590913221 Mon Sep 17 00:00:00 2001
+From: yijiuxia <239743279+yijiuxia@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 10:30:22 -0500
+Subject: [PATCH] lora-per-chat: per-chat LoRA adapters for NobodyWhoChat
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ llama-cpp-2/src/context.rs | 28 ++++++++++++++++++++++++++++
+ llama-cpp-2/src/model.rs   | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 56 insertions(+)
+
+diff --git a/llama-cpp-2/src/context.rs b/llama-cpp-2/src/context.rs
+index 066e352..072b220 100644
+--- a/llama-cpp-2/src/context.rs
++++ b/llama-cpp-2/src/context.rs
+@@ -388,6 +388,34 @@ impl<'model> LlamaContext<'model> {
+         Ok(())
+     }
+ 
++    /// lora-per-chat: apply a LoRA adapter held behind a shared reference (e.g. in an `Arc` shared
++    /// by several contexts). The adapter itself is never modified by llama.cpp.
++    ///
++    /// # Errors
++    ///
++    /// See [`LlamaLoraAdapterSetError`] for more information.
++    pub fn lora_adapter_set_shared(
++        &mut self,
++        adapter: &LlamaLoraAdapter,
++        scale: f32,
++    ) -> Result<(), LlamaLoraAdapterSetError> {
++        let mut adapters = [unsafe { adapter.lora_adapter.as_mut_ptr_unsound() }];
++        let mut scales = [scale];
++        let err_code = unsafe {
++            llama_cpp_sys_2::llama_set_adapters_lora(
++                self.context.as_mut_ptr(),
++                adapters.as_mut_ptr(),
++                1,
++                scales.as_mut_ptr(),
++            )
++        };
++        if err_code != 0 {
++            return Err(LlamaLoraAdapterSetError::ErrorResult(err_code));
++        }
++        tracing::debug!(scale, "Set shared lora adapter");
++        Ok(())
++    }
++
+     /// Remove all lora adapters.
+     ///
+     /// Note: The upstream API now replaces all adapters at once via
+diff --git a/llama-cpp-2/src/model.rs b/llama-cpp-2/src/model.rs
+index b603761..2163c33 100644
+--- a/llama-cpp-2/src/model.rs
++++ b/llama-cpp-2/src/model.rs
+@@ -396,6 +396,34 @@ impl LlamaModel {
+         })
+     }
+ 
++    /// lora-per-chat: load a LoRA adapter through a shared
++    /// reference, so one adapter file can be loaded once and used by several contexts of the
++    /// same (shared, `Arc`-held) model. llama.cpp only reads the model while doing this.
++    ///
++    /// # Errors
++    ///
++    /// See [`LlamaLoraAdapterInitError`] for more information.
++    pub fn lora_adapter_init_shared(
++        &self,
++        path: impl AsRef<Path>,
++    ) -> Result<LlamaLoraAdapter, LlamaLoraAdapterInitError> {
++        let path = path.as_ref();
++        let path = path
++            .to_str()
++            .ok_or(LlamaLoraAdapterInitError::PathToStrError(
++                path.to_path_buf(),
++            ))?;
++        let cstr = CString::new(path)?;
++        let adapter = unsafe {
++            llama_cpp_sys_2::llama_adapter_lora_init(self.model.as_mut_ptr_unsound(), cstr.as_ptr())
++        };
++        let adapter = Ptr::new(adapter).ok_or(LlamaLoraAdapterInitError::NullResult)?;
++        tracing::debug!(?path, "Initialized shared lora adapter");
++        Ok(LlamaLoraAdapter {
++            lora_adapter: adapter,
++        })
++    }
++
+     /// Create a new context from this model.
+     ///
+     /// # Errors
