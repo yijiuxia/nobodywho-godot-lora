@@ -91,6 +91,44 @@ var npc_a = await NobodyWhoChat.create(model, {
 
 注意：显存大头是"每个对话"，补丁本身很小。原版插件也是这样。
 
+## 多个模型 + 多个补丁
+
+可以同时加载几个不同的底座模型，每个模型下开多个对话，各对话挂各自的补丁。
+
+```gdscript
+var model_a = await NobodyWhoModel.create("res://models/model_a.gguf", {})
+var model_b = await NobodyWhoModel.create("res://models/model_b.gguf", {})
+
+var a1 = await NobodyWhoChat.create(model_a, {"lora_path": "res://lora/a_style1.gguf"})
+var a2 = await NobodyWhoChat.create(model_a, {})                                   # 不挂补丁
+var b1 = await NobodyWhoChat.create(model_b, {"lora_path": "res://lora/b_style1.gguf"})
+```
+
+规则：
+
+- **补丁必须匹配底座模型**。给 A 训练的补丁不能挂到 B 上。挂错时 `NobodyWhoChat.create` 会报错并返回 `null`，不会崩溃，其他对话照常工作。llama.cpp 日志里会显示 `model arch and LoRA arch mismatch`。
+- **一个对话同一时间只挂一个补丁**，不能叠加多个。
+- 每个模型各管自己的补丁，同一个补丁文件在同一个模型下只加载一次。
+
+显存估算 = 每个模型本体 + 每个补丁 + 每个对话（对话记忆 + 计算缓冲）。对话占用和模型的词表、层数有关，`n_ctx` 4096 时：
+
+| 底座 | 模型本体 | 每个对话 | 补丁 |
+|---|---|---|---|
+| Qwen3.5 2B q4_k_m | 约 1205 MB | 约 553 MB | r16 约 51 MB |
+| Qwen2.5 0.5B q4_k_m | 约 374 MB | 约 356 MB | r8 约 17 MB |
+
+实测（RTX 4050 Laptop 6 GB，temperature 0，补丁是随机生成的测试补丁）：同时加载上面两个模型，各开 2 个对话（一个挂补丁、一个不挂），4 个对话交替生成。
+
+| 检查 | 结果 |
+|---|---|
+| 两个模型都正常回复 | ✅ |
+| 挂补丁的输出和不挂的不同（两个模型都是） | ✅ |
+| 模型 B 不挂补丁的输出，和单独只加载 B 时一字不差 | ✅ |
+| 模型 A 挂/不挂补丁的输出，和单独只加载 A 时一字不差 | ✅ |
+| 把 A 的补丁挂到 B 上（反过来也试了） | 报错并返回 `null`，不崩溃 ✅ |
+| 挂错之后，原有对话继续正常生成 | ✅ |
+
+这次实测两个模型、4 个对话、2 个补丁，合计约 3.5 GB 显存。
 ## 自己编译
 
 需要准备：
@@ -173,4 +211,4 @@ var chat = await NobodyWhoChat.create(model, {"lora_path": "path/to/adapter.gguf
 - Without `lora_path`, output is identical to the official 13.0.0 build (tested at temperature 0).
 - Download the DLL from **Releases** (SHA256 above) and replace `addons/nobodywho/libnobodywho-godot-x86_64-pc-windows-msvc-release.dll`.
 - Source changes are in `patches/`. Apply them to `nobodywho` at tag `nobodywho-godot-v13.0.0` and `llama-cpp-rs` at commit `22e5874`, cloned side by side, then build with Vulkan SDK 1.4.313.2.
-- License: EUPL-1.2 (same as NobodyWho). The llama-cpp-rs patch is MIT OR Apache-2.0.
+- Several base models can be loaded at once, each with its own chats and adapters. An adapter must match its base model: a mismatched adapter makes `NobodyWhoChat.create` fail with an error and return `null` (no crash, other chats keep working). One adapter per chat. Tested with Qwen3.5 2B + Qwen2.5 0.5B, 2 chats each, at temperature 0: outputs of each model are identical to loading that model alone; about 3.5 GB VRAM in total.- License: EUPL-1.2 (same as NobodyWho). The llama-cpp-rs patch is MIT OR Apache-2.0.
